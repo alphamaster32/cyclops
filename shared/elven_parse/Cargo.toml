@@ -1,0 +1,10 @@
+[package]
+name = "elven_parse"
+version = "0.0.0"
+edition = "2021"
+description = "A small elf parser used for research and embedded development"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]

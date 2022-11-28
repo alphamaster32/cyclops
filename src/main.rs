@@ -1,3 +1,48 @@
-fn main() {
-    println!("Hello, world!");
+use elven_parse::Elf;
+use elven_parse::program::ProgramType;
+
+mod mmu;
+mod emu;
+
+/// Error type for the emulator
+#[derive(Debug)]
+pub enum Error {
+}
+
+/// Wrapper type for the error result
+type Result<T> = core::result::Result<T, Error>;
+
+fn main() -> Result<()>{
+    // Get the file handle for the intended binary and parse the elf
+    let file = std::fs::read("test/test").unwrap();
+    let elf = Elf::new(file.as_slice()).parse().unwrap();
+
+    println!("{:#?}", elf.file_header);
+
+    // allocate a 512 MiB memory block for the emulator
+    let mut emu = emu::Emu::new(64 * 1024 * 1024);
+    
+    // Check all the sections and load only the load section with the required
+    // permissions
+    for program in elf.program_iter() {
+        println!("{:#?}", program);
+        if program.p_type == ProgramType::PtLoad {
+            emu.mmu.load(&program, file.as_slice());
+        }
+    }
+
+    for section in elf.section_iter() {
+        println!("{:#?}", section);
+    }
+
+    let mut pc = elf.file_header.e_entry;
+    for i in 1..10 {
+        let inst = u32::from_le_bytes(emu.mmu.memory.get(
+            pc..pc.checked_add(4).unwrap()).unwrap().try_into().unwrap());
+        let inst: emu::Inst = inst.into();
+        println!("{:?}", inst);
+        pc = pc + 4;
+    }
+
+    Ok(())
 }
