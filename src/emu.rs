@@ -208,9 +208,44 @@ pub enum Opcode {
     None,
     LUI,
     AUIPC,
-    ADDI,
-    SUB,
     JAL,
+    JALR,
+    BEQ,
+    BNE,
+    BLT,
+    BGE,
+    BLTU,
+    BGEU,
+    LB,
+    LH,
+    LW,
+    LBU,
+    LHU,
+    SB,
+    SH,
+    SW,
+    ADDI,
+    SLTI,
+    SLTIU,
+    XORI,
+    ORI,
+    ANDI,
+    SLLI,
+    SLRI,
+    SRAI,
+    ADD,
+    SUB,
+    SLL,
+    SLT,
+    SLTU,
+    XOR,
+    SRL,
+    SRA,
+    OR,
+    AND,
+    // Not implementing fences
+    ECALL,
+    EBREAK
 }
 
 impl From<u32> for Opcode {
@@ -218,17 +253,102 @@ impl From<u32> for Opcode {
         match val & 0b1111111 {
             0b0110111 => Opcode::LUI,
             0b0010111 => Opcode::AUIPC,
-            0b0010011 => Opcode::ADDI,
+            0b0010011 => {
+                // We know it's a I-Type
+                let inst: Itype = val.into();
+                match inst.funct3 {
+                    0b000 => Opcode::ADDI,
+                    0b010 => Opcode::SLTI,
+                    0b011 => Opcode::SLTIU,
+                    0b100 => Opcode::XORI,
+                    0b110 => Opcode::ORI,
+                    0b111 => Opcode::ANDI,
+                    0b001 => Opcode::SLLI,
+                    0b101 => {
+                        // A very odd choice that these opcodes are R-Type
+                        match inst.imm >> 5 {
+                            0b0000000 => Opcode::SLRI,
+                            0b0100000 => Opcode::SRAI,
+                            _         => Opcode::None
+                        }
+                    },
+                    _     => Opcode::None
+                }
+            },
             0b1101111 => Opcode::JAL,
+            0b1100111 => Opcode::JALR,
+            0b1100011 => {
+                // We know it's a B-Type
+                let inst: Btype = val.into();
+                match inst.funct3 {
+                    0b000 => Opcode::BEQ,
+                    0b001 => Opcode::BNE,
+                    0b100 => Opcode::BLT,
+                    0b101 => Opcode::BGE,
+                    0b110 => Opcode::BLTU,
+                    0b111 => Opcode::BGEU,
+                    _     => Opcode::None,
+                }
+            },
+            0b0000011 => {
+                // We know it's a I-Type
+                let inst: Itype = val.into();
+                match inst.funct3 {
+                    0b000 => Opcode::LB,
+                    0b001 => Opcode::LH,
+                    0b010 => Opcode::LW,
+                    0b100 => Opcode::LBU,
+                    0b101 => Opcode::LHU,
+                    _     => Opcode::None
+                }
+            },
+            0b0100011 => {
+                // We know it's a S-Type
+                let inst: Stype = val.into();
+                match inst.funct3 {
+                    0b000 => Opcode::SB,
+                    0b001 => Opcode::SH,
+                    0b010 => Opcode::SW,
+                    _     => Opcode::None,
+                }
+            },
             0b0110011 => {
-                // We know it is an R-Type
+                // We know it's a R-Type
                 let inst: Rtype = val.into();
                 match inst.funct3 {
-                    0b000 => Opcode::SUB,
-                    _     => {
-                        println!("{}: Unknown funct3", inst.funct3);
-                        Opcode::None
-                    }
+                    0b000 => {
+                        match inst.funct7 {
+                            0b0000000 => Opcode::ADD,
+                            0b0100000 => Opcode::SUB,
+                            _         => Opcode::None,
+                        }
+                    },
+                    0b001 => Opcode::SLL,
+                    0b010 => Opcode::SLT,
+                    0b011 => Opcode::SLTU,
+                    0b100 => Opcode::XOR,
+                    0b101 => {
+                        match inst.funct7 {
+                            0b0000000 => Opcode::SRL,
+                            0b1000000 => Opcode::SRA,
+                            _         => Opcode::None,
+                        }
+                    },
+                    0b110 => Opcode::OR,
+                    0b111 => Opcode::AND,
+                    _     => Opcode::None,
+                }
+            },
+            0b0001111 => {
+                unreachable!()
+            },
+            0b1110011 => {
+                // ECALL and EBREAK
+                let inst: Itype = val.into();
+                match inst.imm {
+                    0b000000000000 => Opcode::ECALL,
+                    0b000000000001 => Opcode::EBREAK,
+                    _              => Opcode::None
                 }
             }
             _ => Opcode::None,
@@ -247,12 +367,46 @@ impl From<u32> for Inst {
     fn from(val: u32) -> Self {
         let opcode: Opcode = val.into();
         let typ = match opcode {
-            Opcode::LUI   => Type::U(val.into()),
-            Opcode::AUIPC => Type::U(val.into()),
-            Opcode::ADDI  => Type::I(val.into()),
-            Opcode::SUB   => Type::R(val.into()),
-            Opcode::JAL   => Type::J(val.into()),
-            _ => Type::None,
+            Opcode::LUI    => Type::U(val.into()),
+            Opcode::AUIPC  => Type::U(val.into()),
+            Opcode::JAL    => Type::J(val.into()),
+            Opcode::JALR   => Type::I(val.into()),
+            Opcode::BEQ    => Type::B(val.into()),
+            Opcode::BNE    => Type::B(val.into()),
+            Opcode::BLT    => Type::B(val.into()),
+            Opcode::BGE    => Type::B(val.into()),
+            Opcode::BLTU   => Type::B(val.into()),
+            Opcode::BGEU   => Type::B(val.into()),
+            Opcode::LB     => Type::I(val.into()),
+            Opcode::LH     => Type::I(val.into()),
+            Opcode::LW     => Type::I(val.into()),
+            Opcode::LBU    => Type::I(val.into()),
+            Opcode::LHU    => Type::I(val.into()),
+            Opcode::SB     => Type::S(val.into()),
+            Opcode::SH     => Type::S(val.into()),
+            Opcode::SW     => Type::S(val.into()),
+            Opcode::ADDI   => Type::I(val.into()),
+            Opcode::SLTI   => Type::I(val.into()),
+            Opcode::SLTIU  => Type::I(val.into()),
+            Opcode::XORI   => Type::I(val.into()),
+            Opcode::ORI    => Type::I(val.into()),
+            Opcode::ANDI   => Type::I(val.into()),
+            Opcode::SLLI   => Type::I(val.into()),
+            Opcode::SLRI   => Type::I(val.into()),
+            Opcode::SRAI   => Type::I(val.into()),
+            Opcode::ADD    => Type::R(val.into()),
+            Opcode::SUB    => Type::R(val.into()),
+            Opcode::SLL    => Type::R(val.into()),
+            Opcode::SLT    => Type::R(val.into()),
+            Opcode::SLTU   => Type::R(val.into()),
+            Opcode::XOR    => Type::R(val.into()),
+            Opcode::SRL    => Type::R(val.into()),
+            Opcode::SRA    => Type::R(val.into()),
+            Opcode::OR     => Type::R(val.into()),
+            Opcode::AND    => Type::R(val.into()),
+            Opcode::ECALL  => Type::I(val.into()),
+            Opcode::EBREAK => Type::I(val.into()),
+            _              => Type::None,
         };
         Inst {
             typ,

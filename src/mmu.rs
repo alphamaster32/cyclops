@@ -3,7 +3,7 @@ use crate::Error;
 
 /// VirtAddr represents the virtual address for the guest machine
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub struct VirtAddr(pub usize);
 
 impl From<usize> for VirtAddr {
@@ -21,6 +21,12 @@ pub struct Mmu {
 
     /// Permission bits for every offset in the vector
     pub permissions: Vec<Perm>,
+
+    /// Base of the current allocation
+    pub alloc_base: VirtAddr,
+
+    /// Record of the allocations for the free function
+    pub alloc_active: std::collections::HashMap<VirtAddr, usize>
 }
 
 impl Mmu {
@@ -29,6 +35,8 @@ impl Mmu {
         Mmu {
             memory: vec![0; size],
             permissions: vec![Perm(false, false, false); size],
+            alloc_base: VirtAddr(0),
+            alloc_active: std::collections::HashMap::new()
         }
     }
 
@@ -44,6 +52,13 @@ impl Mmu {
         self.set_permissions(program.p_vaddr.into(), program.p_memsz,
         program.p_flags);
 
+        // Move the base of the allocation to somewhere ahead of the loaded
+        // segments and align to 4096 or 12 bit boundary
+        self.alloc_base.0 = core::cmp::max(
+            program.p_vaddr
+            .checked_add(program.p_memsz + (program.p_align - 1))?
+            & !(program.p_align - 1), self.alloc_base.0);
+
         Some(())
     }
 
@@ -57,6 +72,7 @@ impl Mmu {
         Some(())
     }
 
+    /// Helper function to write a buffer to an virtual address
     pub fn write_from(&mut self, addr: VirtAddr, buf: &[u8]) ->
         Result<(), Error> {
         // We should check for permission errors but not for now
@@ -67,5 +83,47 @@ impl Mmu {
         self.set_permissions(addr, buf.len(), Perm(true, false, false));
 
         Ok(())
+    }
+
+    /// Allocate memory in mmu
+    pub fn allocate(&mut self, size: usize) -> Option<VirtAddr> {
+        // align to byte boundary
+        let aligned_size = (size + 0x7) & !0x7;
+
+        // See if you can allocate
+        let base = self.alloc_base;
+        if  base.0 > self.memory.len() {
+            return None;
+        }
+
+        // Set the new allocation
+        self.alloc_base = VirtAddr(self.alloc_base.0
+            .checked_add(aligned_size)?);
+
+        // Check if the new allocation surpasses the amount of memory we have
+        if self.alloc_base.0 > self.memory.len() {
+            return None;
+        }
+
+        // Set the permissions for the new section as read and writable
+        self.set_permissions(base, size, Perm(true, true, false))?;
+
+        self.alloc_active.insert(base, size);
+
+        Some(base)
+
+    }
+
+    /// Free the allocated memory
+    pub fn free(&mut self, base: VirtAddr) -> Result<(), Error> {
+        // Remove the allocation from current ones
+        if let Some(size) = self.alloc_active.remove(&base) {
+            // Clear permissions
+            self.set_permissions(base, size, Perm(false, false, false));
+
+            Ok(())
+        } else {
+            Err(Error::InvalidFree)
+        }
     }
 }
