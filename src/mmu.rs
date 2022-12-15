@@ -13,7 +13,7 @@ impl From<usize> for VirtAddr {
 }
 
 /// Mmu is the representation of the memory management unit
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Mmu {
     /// Guest address space
     /// Offset 0 corresponds to the 0 in the guest address space

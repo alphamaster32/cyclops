@@ -5,12 +5,17 @@ use core::arch::x86_64::_rdtsc;
 
 mod mmu;
 mod emu;
+mod vcpu;
 
 /// Error type for the emulator
 #[derive(Debug)]
 pub enum Error {
+    /// Integer overflow or underflow
+    ArithmeticException,
     /// Indicates that the free function was unable to find the allocation
-    InvalidFree
+    InvalidFree,
+    /// Stage is occupied
+    NotEmpty,
 }
 
 /// Wrapper type for the error result
@@ -20,8 +25,6 @@ fn main() -> Result<()>{
     // Get the file handle for the intended binary and parse the elf
     let file = std::fs::read("test/test").unwrap();
     let elf = Elf::new(file.as_slice()).parse().unwrap();
-
-    let it = unsafe { _rdtsc() };
 
     // allocate a 512 MiB memory block for the emulator
     let mut emu = emu::Emu::new(64 * 1024 * 1024);
@@ -48,25 +51,19 @@ fn main() -> Result<()>{
     let mut pc = elf.file_header.e_entry;
     // Calculate the end of the text section
     let text_end = text_size + text_addr;
-    loop {
-        if pc >= text_end {
-            break
-        }
-        let inst = u32::from_le_bytes(emu.mmu.memory.get(
-            pc..pc.checked_add(4).unwrap()).unwrap().try_into().unwrap());
-        let inst: emu::Inst = inst.into();
-        println!("{:x?}: {:x?}", pc, inst);
-        pc = pc + 4;
-    }
+    // set the pc in emu
+    emu.pc = pc;
+    emu.state.set(emu::Register::Pc, pc as u32);
 
-    let el = unsafe { _rdtsc() };
-
-    let base = emu.mmu.allocate(0x10).ok_or(Error::InvalidFree)?;
-    emu.mmu.free(base);
-    println!("{:x?}", emu.mmu.alloc_base);
-
-    //println!("{:?}", el - it);
-    //println!("{:x?}", emu.mmu.alloc_base);
+    //Cycle a instruction in emu
+    emu.cycle()?;
+    emu.cycle()?;
+    emu.cycle()?;
+    emu.cycle()?;
+    emu.cycle()?;
+    emu.cycle()?;
+    println!("{:#}", emu);
+    println!("{:#?}", emu.pipe);
 
     Ok(())
 }

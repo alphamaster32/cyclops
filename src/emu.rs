@@ -1,5 +1,9 @@
 use crate::mmu::Mmu;
-use std::fmt;
+use crate::vcpu::PipeLine;
+use crate::Error;
+
+use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// 32-bit RISC-V registers 
 /// These are the ABI names from chapter 25 of ISA specification
@@ -52,8 +56,24 @@ impl From<u32> for Register {
     }
 }
 
-/// An R-type instruction
+/// This struct represents a transfer of state on the `EmuState`
 #[derive(Debug)]
+pub struct RegisterTransfer {
+    reg: Register,
+    val: u32,
+    pc:  u32
+}
+
+/// This struct represents a transfer of state on the `Mmu`
+#[derive(Debug)]
+pub struct MemoryTransfer {
+    loc: usize,
+    val: u32,
+    pc:  u32
+}
+
+/// An R-type instruction
+#[derive(Debug, Clone, PartialEq)]
 pub struct Rtype {
     funct7: u32,
     rs2:    Register,
@@ -75,7 +95,7 @@ impl From<u32> for Rtype {
 }
 
 /// An S-type instruction
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Stype {
     imm:    i32,
     rs2:    Register,
@@ -101,7 +121,7 @@ impl From<u32> for Stype {
 }
 
 /// A J-type instruction
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Jtype {
     imm: i32,
     rd:  Register,
@@ -126,7 +146,7 @@ impl From<u32> for Jtype {
 }
 
 /// A B-type instruction
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Btype {
     imm:    i32,
     rs2:    Register,
@@ -154,7 +174,7 @@ impl From<u32> for Btype {
 }
 
 /// An I-type instruction
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Itype {
     imm:    i32,
     rs1:    Register,
@@ -175,7 +195,7 @@ impl From<u32> for Itype {
 }
 
 /// An U-type instructions
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Utype {
     imm: i32,
     rd:  Register,
@@ -192,7 +212,7 @@ impl From<u32> for Utype {
 
 /// An enum representing the instruction type to be embedded into the `Inst`
 /// struct
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     None,
     U(Utype),
@@ -357,9 +377,9 @@ impl From<u32> for Opcode {
 }
 
 /// An struct representing instruction
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Inst {
-    pub typ: Type,
+    pub typ:    Type,
     pub opcode: Opcode,
 }
 
@@ -415,7 +435,59 @@ impl From<u32> for Inst {
     }
 }
 
+impl Inst {
+    /// Get the destination register
+    pub fn rd(&self) -> Option<Register> {
+        match &self.typ {
+            Type::U(inst) => Some(inst.rd),
+            Type::I(inst) => Some(inst.rd),
+            Type::B(inst) => None,
+            Type::J(inst) => Some(inst.rd),
+            Type::S(inst) => None,
+            Type::R(inst) => Some(inst.rd),
+            _             => None
+        }
+    }
+    /// Get the first source register
+    pub fn rs1(&self) -> Option<Register> {
+        match &self.typ {
+            Type::U(inst) => None,
+            Type::I(inst) => Some(inst.rs1),
+            Type::B(inst) => Some(inst.rs1),
+            Type::J(inst) => None,
+            Type::S(inst) => Some(inst.rs1),
+            Type::R(inst) => Some(inst.rs1),
+            _             => None
+        }
+    }
+    /// Get the second source register
+    fn rs2(&self) -> Option<Register> {
+        match &self.typ {
+            Type::U(inst) => None,
+            Type::I(inst) => None,
+            Type::B(inst) => Some(inst.rs2),
+            Type::J(inst) => None,
+            Type::S(inst) => Some(inst.rs2),
+            Type::R(inst) => Some(inst.rs2),
+            _             => None
+        }
+    }
+    /// Get the immediate
+    pub fn imm(&self) -> Option<i32> {
+        match &self.typ {
+            Type::U(inst) => Some(inst.imm),
+            Type::I(inst) => Some(inst.imm),
+            Type::B(inst) => Some(inst.imm),
+            Type::J(inst) => Some(inst.imm),
+            Type::S(inst) => Some(inst.imm),
+            Type::R(inst) => None,
+            _             => None
+        }
+    }
+}
+
 /// Struct with the emulator state and register in it
+#[derive(Debug, Clone, Copy)]
 pub struct EmuState {
     regs: [u32; 33],
 }
@@ -427,33 +499,136 @@ impl EmuState {
             regs: [0u32; 33],
         }
     }
+    /// Get a register from the state
+    pub fn reg(&self, register: Register) -> u32 {
+        if register != Register::Zero {
+            self.regs[register as usize]
+        } else {
+            0
+        }
+    }
+
+    pub fn set(&mut self, register: Register, val: u32) {
+        self.regs[register as usize] = val;
+    }
+
+    pub fn commit(&mut self, rt: RegisterTransfer) {
+        self.set(rt.reg, rt.val);
+    }
 }
 
 /// An struct representing emulator which will get plugged with other 
 /// components
 pub struct Emu {
-    pub mmu: Mmu,
-    pub state: EmuState,
+    pub mmu:             Mmu,
+    pub state:           EmuState,
+    pub pipe:            PipeLine,
+    pub pc:              usize,
+    pub cycles:          AtomicUsize,
+    pub uncommited_mems:  Vec<MemoryTransfer>,
+    pub uncommited_regs: Vec<RegisterTransfer>
 }
 
 impl Emu {
     /// Struct initialization sequence
     pub fn new(size: usize) -> Self {
         Emu {
-            mmu: Mmu::new(size),
-            state: EmuState::new(),
+            mmu:             Mmu::new(size),
+            state:           EmuState::new(),
+            pipe:            PipeLine::new(),
+            pc:              0,
+            cycles:          AtomicUsize::new(1),
+            uncommited_mems: vec![],
+            uncommited_regs: vec![]
         }
     }
+    pub fn cycle(&mut self) -> Result<(), Error> {
+        //Fetch the instruction
+        let pc = self.state.reg(Register::Pc);
+        let inst: Inst = u32::from_le_bytes(self.mmu.memory.get(
+                (pc as usize)..pc.checked_add(4)
+                .ok_or(Error::ArithmeticException)? as usize)
+                .ok_or(Error::ArithmeticException)?
+                .try_into().map_err(|_err| Error::ArithmeticException)?)
+                .into();
 
-    /// Get a register from the state
-    pub fn reg(&self, register: Register) -> u32 {
-        if register != Register::Zero {
-            self.state.regs[register as usize]
-        } else {
-            0
+        // Fetch the first instrction
+        let mut next: Option<Inst> = None;
+        // If there is a hazard do not move the pc
+        if !self.pipe.is_hazard() {
+            next = self.pipe.fetch.add_inst(Some(inst));
+            let pc = self.state.reg(Register::Pc);
+            self.state.set(Register::Pc, pc + 4);
         }
-    }
 
+        // Move the instructions in the pipeline
+            // We read the registers in this stage
+            if !self.pipe.is_hazard() {
+                next = self.pipe.decode.add_inst(next);
+            }
+            // Before moving the instruction we should execute it
+            if next.clone().is_some() && !self.pipe.is_hazard() {
+                let (rt, mt) = self.run_inst(next.clone());
+                self.uncommited_regs.push(rt);
+            }
+            //self.uncommited_mems.push(mt);
+            let next = self.pipe.execute.add_inst(next.clone());
+            // Access the memory in this stage
+            //self.state.commit(self.)
+            let next = self.pipe.memory.add_inst(next);
+            // We write the registers in this stage
+            if let Some(inst) = self.pipe.writeback.add_inst(next) {
+                if self.uncommited_regs.len() > 0 {
+                    println!("{:x?}", self.uncommited_regs);
+                    self.state.commit(self.uncommited_regs.remove(0));
+                }
+            }
+        // Increment atomicaly for future multi-thread update
+        self.cycles.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    /// Run the selected instruction on the emulator
+    /// Where this instruction is executed is dependent on the pipeline stage
+    pub fn run_inst(&self, inst: Option<Inst>) -> (RegisterTransfer, MemoryTransfer) {
+        // Copy the state
+        let mut mmu = self.mmu.clone();
+        let mut emustate = self.state.clone();
+        let mut rt = RegisterTransfer {
+            reg: Register::Zero,
+            val: 0,
+            pc: emustate.reg(Register::Pc)
+        };
+        let mut mt = MemoryTransfer {
+            loc: 0,
+            val: 0,
+            pc: emustate.reg(Register::Pc)
+        };
+
+        // Check for the opcode
+        // Possible panic place
+        let inst = inst.unwrap();
+        match inst.opcode {
+            Opcode::AUIPC => {
+               rt.val = (emustate.reg(Register::Pc) as u32).wrapping_add(
+               inst.imm().unwrap() as u32);
+               rt.reg = inst.rd().unwrap();
+            },
+            Opcode::ADDI => {
+                rt.val = (emustate.reg(inst.rs1().unwrap()) as i32)
+                    .wrapping_add(inst.imm().unwrap() as i32) as u32;
+                rt.reg = inst.rd().unwrap();
+            },
+            Opcode::SUB => {
+                rt.val = (emustate.reg(inst.rs1().unwrap()) as i32 +
+                emustate.reg(inst.rs2().unwrap()) as i32) as u32;
+                rt.reg = inst.rd().unwrap();
+            },
+            _             => {
+                //unimplemented!("unimplemented Opcode {:?}", inst.opcode)
+            }
+        }
+        (rt, mt)
+    }
 }
 
 impl fmt::Display for Emu {
@@ -468,38 +643,38 @@ s4   {:08x} s5 {:08x} s6  {:08x} s7  {:08x}
 s8   {:08x} s9 {:08x} s10 {:08x} s11 {:08x}
 t3   {:08x} t4 {:08x} t5  {:08x} t6  {:08x}
 pc   {:08x}"#,
-        self.reg(Register::Zero),
-        self.reg(Register::Ra),
-        self.reg(Register::Sp),
-        self.reg(Register::Gp),
-        self.reg(Register::Tp),
-        self.reg(Register::T0),
-        self.reg(Register::T1),
-        self.reg(Register::T2),
-        self.reg(Register::S0),
-        self.reg(Register::S1),
-        self.reg(Register::A0),
-        self.reg(Register::A1),
-        self.reg(Register::A2),
-        self.reg(Register::A3),
-        self.reg(Register::A4),
-        self.reg(Register::A5),
-        self.reg(Register::A6),
-        self.reg(Register::A7),
-        self.reg(Register::S2),
-        self.reg(Register::S3),
-        self.reg(Register::S4),
-        self.reg(Register::S5),
-        self.reg(Register::S6),
-        self.reg(Register::S7),
-        self.reg(Register::S8),
-        self.reg(Register::S9),
-        self.reg(Register::S10),
-        self.reg(Register::S11),
-        self.reg(Register::T3),
-        self.reg(Register::T4),
-        self.reg(Register::T5),
-        self.reg(Register::T6),
-        self.reg(Register::Pc))
+        self.state.reg(Register::Zero),
+        self.state.reg(Register::Ra),
+        self.state.reg(Register::Sp),
+        self.state.reg(Register::Gp),
+        self.state.reg(Register::Tp),
+        self.state.reg(Register::T0),
+        self.state.reg(Register::T1),
+        self.state.reg(Register::T2),
+        self.state.reg(Register::S0),
+        self.state.reg(Register::S1),
+        self.state.reg(Register::A0),
+        self.state.reg(Register::A1),
+        self.state.reg(Register::A2),
+        self.state.reg(Register::A3),
+        self.state.reg(Register::A4),
+        self.state.reg(Register::A5),
+        self.state.reg(Register::A6),
+        self.state.reg(Register::A7),
+        self.state.reg(Register::S2),
+        self.state.reg(Register::S3),
+        self.state.reg(Register::S4),
+        self.state.reg(Register::S5),
+        self.state.reg(Register::S6),
+        self.state.reg(Register::S7),
+        self.state.reg(Register::S8),
+        self.state.reg(Register::S9),
+        self.state.reg(Register::S10),
+        self.state.reg(Register::S11),
+        self.state.reg(Register::T3),
+        self.state.reg(Register::T4),
+        self.state.reg(Register::T5),
+        self.state.reg(Register::T6),
+        self.state.reg(Register::Pc))
     }
 }
