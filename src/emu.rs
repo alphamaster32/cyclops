@@ -1,4 +1,4 @@
-use crate::mmu::Mmu;
+use crate::mmu::{Mmu, VirtAddr};
 use crate::vcpu::PipeLine;
 use crate::Error;
 
@@ -57,19 +57,21 @@ impl From<u32> for Register {
 }
 
 /// This struct represents a transfer of state on the `EmuState`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RegisterTransfer {
     reg: Register,
     val: u32,
-    pc:  u32
+    //pc:  u32
 }
 
 /// This struct represents a transfer of state on the `Mmu`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MemoryTransfer {
-    loc: usize,
-    val: u32,
-    pc:  u32
+    loc:  usize,
+    val:  [u8; 4],
+    pc:   u32,
+    size: usize,
+    read: bool
 }
 
 /// An R-type instruction
@@ -381,6 +383,8 @@ impl From<u32> for Opcode {
 pub struct Inst {
     pub typ:    Type,
     pub opcode: Opcode,
+    pub pc:     u32,
+    pub state:  Option<EmuState>
 }
 
 impl From<u32> for Inst {
@@ -431,6 +435,8 @@ impl From<u32> for Inst {
         Inst {
             typ,
             opcode,
+            state: None,
+            pc: 0
         }
     }
 }
@@ -461,7 +467,7 @@ impl Inst {
         }
     }
     /// Get the second source register
-    fn rs2(&self) -> Option<Register> {
+    pub fn rs2(&self) -> Option<Register> {
         match &self.typ {
             Type::U(inst) => None,
             Type::I(inst) => None,
@@ -487,7 +493,7 @@ impl Inst {
 }
 
 /// Struct with the emulator state and register in it
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EmuState {
     regs: [u32; 33],
 }
@@ -525,7 +531,7 @@ pub struct Emu {
     pub pipe:            PipeLine,
     pub pc:              usize,
     pub cycles:          AtomicUsize,
-    pub uncommited_mems:  Vec<MemoryTransfer>,
+    pub uncommited_mems: Vec<MemoryTransfer>,
     pub uncommited_regs: Vec<RegisterTransfer>
 }
 
@@ -545,16 +551,18 @@ impl Emu {
     pub fn cycle(&mut self) -> Result<(), Error> {
         //Fetch the instruction
         let pc = self.state.reg(Register::Pc);
-        let inst: Inst = u32::from_le_bytes(self.mmu.memory.get(
+        //println!("{:?}", pc.checked_add(4));
+        let mut inst: Inst = u32::from_le_bytes(self.mmu.memory.get(
                 (pc as usize)..pc.checked_add(4)
                 .ok_or(Error::ArithmeticException)? as usize)
                 .ok_or(Error::ArithmeticException)?
                 .try_into().map_err(|_err| Error::ArithmeticException)?)
                 .into();
-
+        inst.state= None;
+        inst.pc = pc;
         // Fetch the first instrction
         let mut next: Option<Inst> = None;
-        // If there is a hazard do not move the pc
+        // If there is not a hazard proceed
         if !self.pipe.is_hazard() {
             next = self.pipe.fetch.add_inst(Some(inst));
             let pc = self.state.reg(Register::Pc);
@@ -562,46 +570,70 @@ impl Emu {
         }
 
         // Move the instructions in the pipeline
-            // We read the registers in this stage
-            if !self.pipe.is_hazard() {
-                next = self.pipe.decode.add_inst(next);
+        // We read the registers in this stage
+        if next.clone().is_some() && !self.pipe.is_hazard() {
+            let mut inst = next.unwrap();
+            inst.state = Some(self.state.clone());
+            //println!("{:?}", inst);
+            next = self.pipe.decode.add_inst(Some(inst));
+        } else {
+            next = None;
+        }
+        // Before moving the instruction we should execute it
+        if next.clone().is_some() {
+            let (rt, mt) = self.run_inst(next.clone());
+            if rt.clone().is_some() {
+                self.uncommited_regs.push(rt.unwrap());
             }
-            // Before moving the instruction we should execute it
-            if next.clone().is_some() && !self.pipe.is_hazard() {
-                let (rt, mt) = self.run_inst(next.clone());
-                self.uncommited_regs.push(rt);
+            if mt.clone().is_some() {
+                self.uncommited_mems.push(mt.unwrap());
             }
-            //self.uncommited_mems.push(mt);
-            let next = self.pipe.execute.add_inst(next.clone());
-            // Access the memory in this stage
-            //self.state.commit(self.)
-            let next = self.pipe.memory.add_inst(next);
-            // We write the registers in this stage
-            if let Some(inst) = self.pipe.writeback.add_inst(next) {
-                if self.uncommited_regs.len() > 0 {
-                    println!("{:x?}", self.uncommited_regs);
-                    self.state.commit(self.uncommited_regs.remove(0));
-                }
+            println!("inst: {:?}, pc: {:x?}", next.clone().unwrap().opcode,
+            next.clone().unwrap().pc);
+            //println!("{:#}", self);
+        }
+        //self.uncommited_mems.push(mt);
+        let next = self.pipe.execute.add_inst(next.clone());
+        // Access the memory in this stage
+        //self.state.commit(self.)
+        let next = self.pipe.memory.add_inst(next);
+        if self.uncommited_mems.len() > 0 {
+            let mt = self.uncommited_mems.remove(0);
+            self.mmu.write(VirtAddr(mt.loc), mt.size, mt.val);
+        }
+        // We write the registers in this stage
+        let next = self.pipe.writeback.add_inst(next);
+        if self.uncommited_regs.len() > 0 {
+            self.state.commit(self.uncommited_regs.remove(0));
+            // Simulate the half cycle in the writeback stage
+            if self.pipe.decode.inst != None {
+                let mut inst = self.pipe.decode.inst.clone().unwrap();
+                inst.state = Some(self.state.clone());
+                self.pipe.decode.inst = Some(inst);
             }
+        }
         // Increment atomicaly for future multi-thread update
         self.cycles.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
     /// Run the selected instruction on the emulator
     /// Where this instruction is executed is dependent on the pipeline stage
-    pub fn run_inst(&self, inst: Option<Inst>) -> (RegisterTransfer, MemoryTransfer) {
+    pub fn run_inst(&mut self, inst: Option<Inst>) -> 
+        (Option<RegisterTransfer>, Option<MemoryTransfer>) {
         // Copy the state
-        let mut mmu = self.mmu.clone();
-        let mut emustate = self.state.clone();
+        let mmu = self.mmu.clone();
+        let emustate = self.state.clone();
         let mut rt = RegisterTransfer {
             reg: Register::Zero,
             val: 0,
-            pc: emustate.reg(Register::Pc)
+            //pc: emustate.reg(Register::Pc)
         };
         let mut mt = MemoryTransfer {
-            loc: 0,
-            val: 0,
-            pc: emustate.reg(Register::Pc)
+            loc:  0,
+            val:  [0, 0, 0, 0],
+            pc:   emustate.reg(Register::Pc),
+            size: 0,
+            read: false
         };
 
         // Check for the opcode
@@ -609,25 +641,221 @@ impl Emu {
         let inst = inst.unwrap();
         match inst.opcode {
             Opcode::AUIPC => {
-               rt.val = (emustate.reg(Register::Pc) as u32).wrapping_add(
-               inst.imm().unwrap() as u32);
-               rt.reg = inst.rd().unwrap();
-            },
-            Opcode::ADDI => {
-                rt.val = (emustate.reg(inst.rs1().unwrap()) as i32)
+                //FIXME Possible source of bug in the pipeline
+                rt.val = (inst.pc as i32 )
                     .wrapping_add(inst.imm().unwrap() as i32) as u32;
                 rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::ADDI => {
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as i32)
+                    .wrapping_add(inst.imm().unwrap() as i32) as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
             },
             Opcode::SUB => {
-                rt.val = (emustate.reg(inst.rs1().unwrap()) as i32 +
-                emustate.reg(inst.rs2().unwrap()) as i32) as u32;
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as i32 -
+                inst.state.unwrap().reg(inst.rs2().unwrap()) as i32) as u32;
                 rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::JAL => {
+                rt.val = (inst.pc + 0x4) as u32;
+                rt.reg = inst.rd().unwrap();
+                self.state.set(Register::Pc, inst.pc.wrapping_add(
+                        inst.imm().unwrap() as u32
+                        ));
+                self.pipe.decode.inst = None;
+                self.pipe.fetch.inst = None;
+                //println!("{:x?}",inst);
+                return (Some(rt), None);
+            },
+            Opcode::BGEU => {
+                let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
+                let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
+                if rs1 >= rs2 {
+                    self.state.set(Register::Pc, inst.pc + inst.imm().unwrap() 
+                        as u32);
+                    self.pipe.decode.inst = None;
+                    self.pipe.fetch.inst = None;
+                } else {
+                    rt.val = 0;
+                    rt.reg = Register::Zero;
+                }
+                return (Some(rt), None);
+            },
+            Opcode::ANDI => {
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32)
+                    & (inst.imm().unwrap() as u32);
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::BNE => {
+                let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
+                let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
+                if (rs1 as u32) != (rs2 as u32) {
+                    self.state.set(Register::Pc, inst.pc + 
+                        inst.imm().unwrap() as u32);
+                    self.pipe.decode.inst = None;
+                    self.pipe.fetch.inst = None;
+                } else {
+                    rt.val = 0;
+                    rt.reg = Register::Zero;
+                }
+                return (Some(rt), None);
+            },
+            Opcode::SLLI => {
+                let shamt = inst.imm().unwrap() as u32 & 0b111111;
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32) 
+                    << shamt;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::ADD => {
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as i32 +
+                inst.state.unwrap().reg(inst.rs2().unwrap()) as i32) as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::JALR => {
+                let target = inst.state.unwrap().reg(inst.rs1().unwrap())
+                    as u32 + (inst.imm().unwrap() as u32);
+                rt.val = inst.pc + 4;
+                rt.reg = inst.rd().unwrap();
+                self.state.set(Register::Pc, target);
+                self.pipe.decode.inst = None;
+                self.pipe.fetch.inst = None;
+                return (Some(rt), None);
+            },
+            Opcode::SB => {
+                let loc = inst.state.unwrap().reg(inst.rs1().unwrap())
+                    .wrapping_add(inst.imm().unwrap() as u32);
+                let val = inst.state.unwrap().reg(inst.rs2().unwrap())
+                    .to_le_bytes();
+                mt.loc = loc as usize;
+                mt.val = val;
+                mt.size = 1;
+                return (None, Some(mt));
+            },
+            Opcode::SW => {
+                let loc = inst.state.unwrap().reg(inst.rs1().unwrap())
+                    .wrapping_add(inst.imm().unwrap() as i32 as u32);
+                let val = inst.state.unwrap().reg(inst.rs2().unwrap())
+                    .to_le_bytes();
+                mt.loc = loc as usize;
+                mt.val = val;
+                mt.size = 4;
+                return (None, Some(mt));
+            },
+            Opcode::BLTU => {
+                let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
+                let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
+                if (rs1 as u32) < (rs2 as u32){
+                    self.state.set(Register::Pc, inst.pc + inst.imm().unwrap() 
+                        as u32);
+                    self.pipe.decode.inst = None;
+                    self.pipe.fetch.inst = None;
+                } else {
+                    rt.val = 0;
+                    rt.reg = Register::Zero;
+                }
+                return (Some(rt), None);
+            },
+            Opcode::BEQ => {
+                let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
+                let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
+                if (rs1 as u32) == (rs2 as u32){
+                    self.state.set(Register::Pc, inst.pc + inst.imm().unwrap() 
+                        as u32);
+                    self.pipe.decode.inst = None;
+                    self.pipe.fetch.inst = None;
+                } else {
+                    rt.val = 0;
+                    rt.reg = Register::Zero;
+                }
+                return (Some(rt), None);
+            },
+            Opcode::LW => {
+                let addr = inst.state.unwrap().reg(inst.rs1().unwrap())
+                    .wrapping_add(inst.imm().unwrap() as u32) as usize;
+                let mut tmp = [0u8; 4];
+                rt.val = i32::from_le_bytes(self.mmu
+                    .read_word(VirtAddr(addr))) as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::BLT => {
+                let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
+                let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
+                if (rs1 as i32) < (rs2 as i32){
+                    self.state.set(Register::Pc, inst.pc + inst.imm().unwrap() 
+                        as u32);
+                    self.pipe.decode.inst = None;
+                    self.pipe.fetch.inst = None;
+                } else {
+                    rt.val = 0;
+                    rt.reg = Register::Zero;
+                }
+                return (Some(rt), None);
+            },
+            Opcode::LUI => {
+                rt.val = inst.imm().unwrap() as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::SRAI => {
+                let shamt = inst.imm().unwrap() as u32 & 0b111111;
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32) 
+                    >> shamt;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::AND => {
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32 &
+                inst.state.unwrap().reg(inst.rs2().unwrap()) as u32);
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::OR => {
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32 |
+                inst.state.unwrap().reg(inst.rs2().unwrap()) as u32);
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::LBU => {
+                let addr = inst.state.unwrap().reg(inst.rs1().unwrap())
+                    .wrapping_add(inst.imm().unwrap() as u32) as usize;
+                let mut tmp = [0u8; 1];
+                rt.val = u8::from_le_bytes(self.mmu
+                    .read_byte(VirtAddr(addr))) as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::LH => {
+                let addr = inst.state.unwrap().reg(inst.rs1().unwrap())
+                    .wrapping_add(inst.imm().unwrap() as u32) as usize;
+                let mut tmp = [0u8; 2];
+                rt.val = i16::from_le_bytes(self.mmu
+                    .read_half(VirtAddr(addr))) as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::SH => {
+                let loc = inst.state.unwrap().reg(inst.rs1().unwrap())
+                    .wrapping_add(inst.imm().unwrap() as u32);
+                let val = inst.state.unwrap().reg(inst.rs2().unwrap())
+                    .to_le_bytes();
+                mt.loc = loc as usize;
+                mt.val = val;
+                mt.size = 2;
+                return (None, Some(mt));
             },
             _             => {
-                //unimplemented!("unimplemented Opcode {:?}", inst.opcode)
+                println!("{:#}", self);
+                println!("{:x?}", inst);
+                unimplemented!("unimplemented Opcode {:?}", inst.opcode)
             }
         }
-        (rt, mt)
     }
 }
 

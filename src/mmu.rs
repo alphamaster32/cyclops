@@ -75,14 +75,50 @@ impl Mmu {
     /// Helper function to write a buffer to an virtual address
     pub fn write_from(&mut self, addr: VirtAddr, buf: &[u8]) ->
         Result<(), Error> {
-        // We should check for permission errors but not for now
-        // Copy the buffer into the emulator memory
-        self.memory[addr.0..addr.0 + buf.len()].copy_from_slice(buf);
+            // We should check for permission errors but not for now
+            // Copy the buffer into the emulator memory
+            self.memory[addr.0..addr.0 + buf.len()].copy_from_slice(buf);
 
-        // Set the memory as readable
-        self.set_permissions(addr, buf.len(), Perm(true, false, false));
+            // Set the memory as readable
+            self.set_permissions(addr, buf.len(), Perm(true, false, false));
 
-        Ok(())
+            Ok(())
+        }
+
+    pub fn write(&mut self, addr: VirtAddr, size: usize, buf: [u8; 4]) ->
+        Result<(), Error> {
+            // We should check for permission errors but not for now
+            // Copy the buffer into the emulator memory
+            self.memory[addr.0..addr.0 + size].copy_from_slice(&buf[..size]);
+
+            // Set the memory as readable
+            //self.set_permissions(addr, buf.len(), Perm(true, false, false));
+
+            Ok(())
+        }
+
+    /// Reads a word from memory 
+    //FIXME Redundant
+    pub fn read_word(&self, addr: VirtAddr) -> [u8; 4] {
+        let mut buf = [0, 0, 0, 0];
+        buf.copy_from_slice(&self.memory[addr.0..addr.0 + 4]);
+        buf
+    }
+
+    /// Reads a byte from memory 
+    //FIXME Redundant
+    pub fn read_byte(&self, addr: VirtAddr) -> [u8; 1]{
+        let mut buf =  [0];
+        buf.copy_from_slice(&self.memory[addr.0..addr.0 + 1]);
+        buf
+    }
+
+    /// Reads two bytes from memory 
+    //FIXME Redundant
+    pub fn read_half(&self, addr: VirtAddr) -> [u8; 2]{
+        let mut buf =  [0, 0];
+        buf.copy_from_slice(&self.memory[addr.0..addr.0 + 2]);
+        buf
     }
 
     /// Allocate memory in mmu

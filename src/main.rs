@@ -26,8 +26,12 @@ fn main() -> Result<()>{
     let file = std::fs::read("test/test").unwrap();
     let elf = Elf::new(file.as_slice()).parse().unwrap();
 
-    // allocate a 512 MiB memory block for the emulator
-    let mut emu = emu::Emu::new(64 * 1024 * 1024);
+    // Allocate a 512 MiB memory block for the emulator
+    let mut emu = emu::Emu::new(128 * 1024 * 1024);
+    
+    // Allocate stack
+    let stack = emu.mmu.allocate(64 * 1024);
+    let stack = stack.unwrap().0 + 64 * 1024;
     
     // Check all the sections and load only the load section with the required
     // permissions
@@ -48,22 +52,22 @@ fn main() -> Result<()>{
     }
 
     // Get the program counter from the elf header
-    let mut pc = elf.file_header.e_entry;
+    let pc = elf.file_header.e_entry;
     // Calculate the end of the text section
     let text_end = text_size + text_addr;
     // set the pc in emu
     emu.pc = pc;
     emu.state.set(emu::Register::Pc, pc as u32);
+    emu.state.set(emu::Register::Sp, stack as u32);
 
     //Cycle a instruction in emu
-    emu.cycle()?;
-    emu.cycle()?;
-    emu.cycle()?;
-    emu.cycle()?;
-    emu.cycle()?;
-    emu.cycle()?;
+    for i in 1..10000 {
+        let pc = emu.state.reg(emu::Register::Pc);
+        emu.cycle()?;
+        //println!("{:#}", emu);
+    }
     println!("{:#}", emu);
-    println!("{:#?}", emu.pipe);
+    //println!("{:#x?}", emu.pipe);
 
     Ok(())
 }
