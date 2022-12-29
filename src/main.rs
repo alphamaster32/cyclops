@@ -16,6 +16,8 @@ pub enum Error {
     InvalidFree,
     /// Stage is occupied
     NotEmpty,
+    /// Exit syscall has been called
+    EmuExit
 }
 
 /// Wrapper type for the error result
@@ -27,11 +29,11 @@ fn main() -> Result<()>{
     let elf = Elf::new(file.as_slice()).parse().unwrap();
 
     // Allocate a 512 MiB memory block for the emulator
-    let mut emu = emu::Emu::new(128 * 1024 * 1024);
+    let mut emu = emu::Emu::new(32 * 1024 * 1024);
     
     // Allocate stack
-    let stack = emu.mmu.allocate(64 * 1024);
-    let stack = stack.unwrap().0 + 64 * 1024;
+    let stack = emu.mmu.allocate(32 * 1024);
+    let stack = stack.unwrap().0 + 32 * 1024;
     
     // Check all the sections and load only the load section with the required
     // permissions
@@ -61,10 +63,12 @@ fn main() -> Result<()>{
     emu.state.set(emu::Register::Sp, stack as u32);
 
     //Cycle a instruction in emu
-    for i in 1..10000 {
+    loop {
         let pc = emu.state.reg(emu::Register::Pc);
-        emu.cycle()?;
-        //println!("{:#}", emu);
+        let res = emu.cycle();
+        if res.is_err() {
+            break;
+        }
     }
     println!("{:#}", emu);
     //println!("{:#x?}", emu.pipe);

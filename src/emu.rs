@@ -56,12 +56,21 @@ impl From<u32> for Register {
     }
 }
 
+/// File list in the emulator
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum File {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
 /// This struct represents a transfer of state on the `EmuState`
 #[derive(Debug, Clone)]
 pub struct RegisterTransfer {
-    reg: Register,
-    val: u32,
+    reg:     Register,
+    val:     u32,
     //pc:  u32
+    is_exit: bool
 }
 
 /// This struct represents a transfer of state on the `Mmu`
@@ -253,7 +262,7 @@ pub enum Opcode {
     ORI,
     ANDI,
     SLLI,
-    SLRI,
+    SRLI,
     SRAI,
     ADD,
     SUB,
@@ -265,6 +274,15 @@ pub enum Opcode {
     SRA,
     OR,
     AND,
+    // M extention
+    MUL,
+    MULH,
+    MULHSU,
+    MULHU,
+    DIV,
+    DIVU,
+    REM,
+    REMU,
     // Not implementing fences
     ECALL,
     EBREAK
@@ -289,7 +307,7 @@ impl From<u32> for Opcode {
                     0b101 => {
                         // A very odd choice that these opcodes are R-Type
                         match inst.imm >> 5 {
-                            0b0000000 => Opcode::SLRI,
+                            0b0000000 => Opcode::SRLI,
                             0b0100000 => Opcode::SRAI,
                             _         => Opcode::None
                         }
@@ -342,22 +360,60 @@ impl From<u32> for Opcode {
                         match inst.funct7 {
                             0b0000000 => Opcode::ADD,
                             0b0100000 => Opcode::SUB,
+                            0b0000001 => Opcode::MUL,
                             _         => Opcode::None,
                         }
                     },
-                    0b001 => Opcode::SLL,
-                    0b010 => Opcode::SLT,
-                    0b011 => Opcode::SLTU,
-                    0b100 => Opcode::XOR,
+                    0b001 => {
+                        match inst.funct7 {
+                            0b0000001 => Opcode::MULH,
+                            0b0000000 => Opcode::SLL,
+                            _         => Opcode::None,
+                        }
+                    },
+                    0b010 => {
+                        match inst.funct7 {
+                            0b0000000 => Opcode::SLT,
+                            0b0000001 => Opcode::MULHSU,
+                            _         => Opcode::None,
+                        }
+                    },
+                    0b011 => {
+                        match inst.funct7 {
+                            0b0000000 => Opcode::SLTU,
+                            0b0000001 => Opcode::MULHU,
+                            _         => Opcode::None,
+                        }
+                    },
+                    0b100 => {
+                        match inst.funct7 {
+                            0b0000000 => Opcode::XOR,
+                            0b0000001 => Opcode::DIV,
+                            _         => Opcode::None,
+                        }
+                    },
                     0b101 => {
                         match inst.funct7 {
                             0b0000000 => Opcode::SRL,
                             0b1000000 => Opcode::SRA,
+                            0b0000001 => Opcode::DIVU,
                             _         => Opcode::None,
                         }
                     },
-                    0b110 => Opcode::OR,
-                    0b111 => Opcode::AND,
+                    0b110 => {
+                        match inst.funct7 {
+                            0b0000000 => Opcode::OR,
+                            0b0000001 => Opcode::REM,
+                            _         => Opcode::None,
+                        }
+                    }
+                    0b111 => {
+                        match inst.funct7 {
+                            0b0000000 => Opcode::AND,
+                            0b0000001 => Opcode::REMU,
+                            _         => Opcode::None,
+                        }
+                    },
                     _     => Opcode::None,
                 }
             },
@@ -391,46 +447,54 @@ impl From<u32> for Inst {
     fn from(val: u32) -> Self {
         let opcode: Opcode = val.into();
         let typ = match opcode {
-            Opcode::LUI    => Type::U(val.into()),
-            Opcode::AUIPC  => Type::U(val.into()),
-            Opcode::JAL    => Type::J(val.into()),
-            Opcode::JALR   => Type::I(val.into()),
-            Opcode::BEQ    => Type::B(val.into()),
-            Opcode::BNE    => Type::B(val.into()),
-            Opcode::BLT    => Type::B(val.into()),
-            Opcode::BGE    => Type::B(val.into()),
-            Opcode::BLTU   => Type::B(val.into()),
-            Opcode::BGEU   => Type::B(val.into()),
-            Opcode::LB     => Type::I(val.into()),
-            Opcode::LH     => Type::I(val.into()),
-            Opcode::LW     => Type::I(val.into()),
-            Opcode::LBU    => Type::I(val.into()),
-            Opcode::LHU    => Type::I(val.into()),
-            Opcode::SB     => Type::S(val.into()),
-            Opcode::SH     => Type::S(val.into()),
-            Opcode::SW     => Type::S(val.into()),
-            Opcode::ADDI   => Type::I(val.into()),
-            Opcode::SLTI   => Type::I(val.into()),
-            Opcode::SLTIU  => Type::I(val.into()),
-            Opcode::XORI   => Type::I(val.into()),
-            Opcode::ORI    => Type::I(val.into()),
-            Opcode::ANDI   => Type::I(val.into()),
-            Opcode::SLLI   => Type::I(val.into()),
-            Opcode::SLRI   => Type::I(val.into()),
-            Opcode::SRAI   => Type::I(val.into()),
-            Opcode::ADD    => Type::R(val.into()),
-            Opcode::SUB    => Type::R(val.into()),
-            Opcode::SLL    => Type::R(val.into()),
-            Opcode::SLT    => Type::R(val.into()),
-            Opcode::SLTU   => Type::R(val.into()),
-            Opcode::XOR    => Type::R(val.into()),
-            Opcode::SRL    => Type::R(val.into()),
-            Opcode::SRA    => Type::R(val.into()),
-            Opcode::OR     => Type::R(val.into()),
-            Opcode::AND    => Type::R(val.into()),
-            Opcode::ECALL  => Type::I(val.into()),
-            Opcode::EBREAK => Type::I(val.into()),
-            _              => Type::None,
+            Opcode::LUI       => Type::U(val.into()),
+            Opcode::AUIPC     => Type::U(val.into()),
+            Opcode::JAL       => Type::J(val.into()),
+            Opcode::JALR      => Type::I(val.into()),
+            Opcode::BEQ       => Type::B(val.into()),
+            Opcode::BNE       => Type::B(val.into()),
+            Opcode::BLT       => Type::B(val.into()),
+            Opcode::BGE       => Type::B(val.into()),
+            Opcode::BLTU      => Type::B(val.into()),
+            Opcode::BGEU      => Type::B(val.into()),
+            Opcode::LB        => Type::I(val.into()),
+            Opcode::LH        => Type::I(val.into()),
+            Opcode::LW        => Type::I(val.into()),
+            Opcode::LBU       => Type::I(val.into()),
+            Opcode::LHU       => Type::I(val.into()),
+            Opcode::SB        => Type::S(val.into()),
+            Opcode::SH        => Type::S(val.into()),
+            Opcode::SW        => Type::S(val.into()),
+            Opcode::ADDI      => Type::I(val.into()),
+            Opcode::SLTI      => Type::I(val.into()),
+            Opcode::SLTIU     => Type::I(val.into()),
+            Opcode::XORI      => Type::I(val.into()),
+            Opcode::ORI       => Type::I(val.into()),
+            Opcode::ANDI      => Type::I(val.into()),
+            Opcode::SLLI      => Type::I(val.into()),
+            Opcode::SRLI      => Type::I(val.into()),
+            Opcode::SRAI      => Type::I(val.into()),
+            Opcode::ADD       => Type::R(val.into()),
+            Opcode::SUB       => Type::R(val.into()),
+            Opcode::SLL       => Type::R(val.into()),
+            Opcode::SLT       => Type::R(val.into()),
+            Opcode::SLTU      => Type::R(val.into()),
+            Opcode::XOR       => Type::R(val.into()),
+            Opcode::SRL       => Type::R(val.into()),
+            Opcode::SRA       => Type::R(val.into()),
+            Opcode::OR        => Type::R(val.into()),
+            Opcode::AND       => Type::R(val.into()),
+            Opcode::ECALL     => Type::I(val.into()),
+            Opcode::EBREAK    => Type::I(val.into()),
+            Opcode::MUL       => Type::R(val.into()),
+            Opcode::MULH      => Type::R(val.into()),
+            Opcode::MULHSU    => Type::R(val.into()),
+            Opcode::MULHU     => Type::R(val.into()),
+            Opcode::DIV       => Type::R(val.into()),
+            Opcode::DIVU      => Type::R(val.into()),
+            Opcode::REM       => Type::R(val.into()),
+            Opcode::REMU      => Type::R(val.into()),
+            _                 => Type::None,
         };
         Inst {
             typ,
@@ -531,6 +595,7 @@ pub struct Emu {
     pub pipe:            PipeLine,
     pub pc:              usize,
     pub cycles:          AtomicUsize,
+    pub files:           Vec<Option<File>>,
     pub uncommited_mems: Vec<MemoryTransfer>,
     pub uncommited_regs: Vec<RegisterTransfer>
 }
@@ -544,9 +609,17 @@ impl Emu {
             pipe:            PipeLine::new(),
             pc:              0,
             cycles:          AtomicUsize::new(1),
+            files:           vec![
+                Some(File::Stdin),
+                Some(File::Stdout),
+                Some(File::Stderr)
+            ],
             uncommited_mems: vec![],
             uncommited_regs: vec![]
         }
+    }
+    pub fn get_fd(&mut self, fd: usize) -> Option<&mut File> {
+        self.files.get_mut(fd).unwrap().as_mut()
     }
     pub fn cycle(&mut self) -> Result<(), Error> {
         //Fetch the instruction
@@ -560,6 +633,7 @@ impl Emu {
                 .into();
         inst.state= None;
         inst.pc = pc;
+
         // Fetch the first instrction
         let mut next: Option<Inst> = None;
         // If there is not a hazard proceed
@@ -588,9 +662,9 @@ impl Emu {
             if mt.clone().is_some() {
                 self.uncommited_mems.push(mt.unwrap());
             }
-            println!("inst: {:?}, pc: {:x?}", next.clone().unwrap().opcode,
-            next.clone().unwrap().pc);
             //println!("{:#}", self);
+            //println!("inst: {:?}, pc: {:x?}", next.clone().unwrap().opcode,
+            //next.clone().unwrap().pc);
         }
         //self.uncommited_mems.push(mt);
         let next = self.pipe.execute.add_inst(next.clone());
@@ -604,7 +678,11 @@ impl Emu {
         // We write the registers in this stage
         let next = self.pipe.writeback.add_inst(next);
         if self.uncommited_regs.len() > 0 {
-            self.state.commit(self.uncommited_regs.remove(0));
+            let state = self.uncommited_regs.remove(0);
+            if state.is_exit {
+                return Err(Error::EmuExit)
+            }
+            self.state.commit(state);
             // Simulate the half cycle in the writeback stage
             if self.pipe.decode.inst != None {
                 let mut inst = self.pipe.decode.inst.clone().unwrap();
@@ -621,17 +699,18 @@ impl Emu {
     pub fn run_inst(&mut self, inst: Option<Inst>) -> 
         (Option<RegisterTransfer>, Option<MemoryTransfer>) {
         // Copy the state
-        let mmu = self.mmu.clone();
-        let emustate = self.state.clone();
+        //let mmu = self.mmu.clone();
+        //let emustate = self.state.clone();
         let mut rt = RegisterTransfer {
             reg: Register::Zero,
             val: 0,
+            is_exit: false
             //pc: emustate.reg(Register::Pc)
         };
         let mut mt = MemoryTransfer {
             loc:  0,
             val:  [0, 0, 0, 0],
-            pc:   emustate.reg(Register::Pc),
+            pc:   0,
             size: 0,
             read: false
         };
@@ -639,6 +718,7 @@ impl Emu {
         // Check for the opcode
         // Possible panic place
         let inst = inst.unwrap();
+        let is_exit: bool = false;
         match inst.opcode {
             Opcode::AUIPC => {
                 //FIXME Possible source of bug in the pipeline
@@ -673,7 +753,7 @@ impl Emu {
             Opcode::BGEU => {
                 let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
                 let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
-                if rs1 >= rs2 {
+                if (rs1 as u32) >= (rs2 as u32) {
                     self.state.set(Register::Pc, inst.pc + inst.imm().unwrap() 
                         as u32);
                     self.pipe.decode.inst = None;
@@ -693,7 +773,7 @@ impl Emu {
             Opcode::BNE => {
                 let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
                 let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
-                if (rs1 as u32) != (rs2 as u32) {
+                if (rs1 as i32) != (rs2 as i32) {
                     self.state.set(Register::Pc, inst.pc + 
                         inst.imm().unwrap() as u32);
                     self.pipe.decode.inst = None;
@@ -712,14 +792,15 @@ impl Emu {
                 return (Some(rt), None);
             },
             Opcode::ADD => {
-                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as i32 +
-                inst.state.unwrap().reg(inst.rs2().unwrap()) as i32) as u32;
+                rt.val = ((inst.state.unwrap().reg(inst.rs1().unwrap()) as i32)
+                    .wrapping_add(inst.state.unwrap()
+                        .reg(inst.rs2().unwrap()) as i32)) as u32;
                 rt.reg = inst.rd().unwrap();
                 return (Some(rt), None);
             },
             Opcode::JALR => {
-                let target = inst.state.unwrap().reg(inst.rs1().unwrap())
-                    as u32 + (inst.imm().unwrap() as u32);
+                let target = (inst.state.unwrap().reg(inst.rs1().unwrap())
+                    as u32).wrapping_add(inst.imm().unwrap() as u32);
                 rt.val = inst.pc + 4;
                 rt.reg = inst.rd().unwrap();
                 self.state.set(Register::Pc, target);
@@ -751,8 +832,8 @@ impl Emu {
                 let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
                 let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
                 if (rs1 as u32) < (rs2 as u32){
-                    self.state.set(Register::Pc, inst.pc + inst.imm().unwrap() 
-                        as u32);
+                    self.state.set(Register::Pc, (inst.pc)
+                        .wrapping_add(inst.imm().unwrap() as u32));
                     self.pipe.decode.inst = None;
                     self.pipe.fetch.inst = None;
                 } else {
@@ -764,9 +845,9 @@ impl Emu {
             Opcode::BEQ => {
                 let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
                 let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
-                if (rs1 as u32) == (rs2 as u32){
-                    self.state.set(Register::Pc, inst.pc + inst.imm().unwrap() 
-                        as u32);
+                if (rs1 as i32) == (rs2 as i32) {
+                    self.state.set(Register::Pc, (inst.pc)
+                        .wrapping_add(inst.imm().unwrap() as u32));
                     self.pipe.decode.inst = None;
                     self.pipe.fetch.inst = None;
                 } else {
@@ -804,9 +885,9 @@ impl Emu {
                 return (Some(rt), None);
             },
             Opcode::SRAI => {
-                let shamt = inst.imm().unwrap() as u32 & 0b111111;
-                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32) 
-                    >> shamt;
+                let shamt = inst.imm().unwrap() & 0b111111;
+                rt.val = ((inst.state.unwrap().reg(inst.rs1().unwrap()) as i32) 
+                    >> shamt) as u32;
                 rt.reg = inst.rd().unwrap();
                 return (Some(rt), None);
             },
@@ -850,9 +931,265 @@ impl Emu {
                 mt.size = 2;
                 return (None, Some(mt));
             },
+            Opcode::ECALL => {
+                // We've got a syscall
+                // Get the syscall number from the A7 register
+                let num = inst.state.unwrap().reg(Register::A7);
+
+                match num {
+                    // fstat()
+                    80  => {
+                        // Get the arguments
+                        let fd = inst.state.unwrap().reg(Register::A0);
+                        let statbuf = inst.state.unwrap().reg(Register::A1);
+
+                        // Define the kernel Stat64
+                        #[repr(C)]
+                        #[derive(Default, Debug)]
+                        struct Stat {
+                            st_dev:     u64,
+                            st_ino:     u64,
+                            st_mode:    u32,
+                            st_nlink:   u32,
+                            st_uid:     u32,
+                            st_gid:     u32,
+                            st_rdev:    u64,
+                            __pad1:     u64,
+
+                            st_size:    i64,
+                            st_blksize: i32,
+                            __pad2:     i32,
+
+                            st_blocks: i64,
+
+                            st_atime:     u64,
+                            st_atimensec: u64,
+                            st_mtime:     u64,
+                            st_mtimensec: u64,
+                            st_ctime:     u64,
+                            st_ctimensec: u64,
+
+                            __glibc_reserved: [i32; 2],
+                        }
+
+                        // See if the file exists
+                        let file = self.get_fd(fd as usize);
+                        if file.is_none() || file.as_ref().is_none() {
+                            // FD was not valid, return out with an error
+                            rt.val = !0;
+                            rt.reg = Register::A0;
+                            return (Some(rt), None);
+                        }
+
+                        // If it is a file do stuff for now we do not
+                        // have a file
+
+                        // For stdXX we do not need to return anything
+                        // This changes the execution path
+                        rt.val = 0;
+                        rt.reg = Register::A0;
+                        return (Some(rt), None);
+                    },
+                    // brk
+                    214 => {
+                        let req = inst.state.unwrap().reg(Register::A0);
+                        let cur_base = self.mmu.alloc_base;
+
+                        let inc = if req != 0 {
+                            (req as i32).checked_sub(cur_base.0 as i32)
+                                .unwrap()
+                        } else {
+                            0
+                        };
+
+                        // No negative brk
+                        assert!(inc >= 0);
+                        if let Some(_) = self.mmu.allocate(inc as usize) {
+                            let new_base = cur_base.0 + inc as usize;
+                            rt.val = new_base as u32;
+                            rt.reg = Register::A0;
+                        } else {
+                            rt.val = !0;
+                            rt.reg = Register::A0;
+                        }
+                        return (Some(rt), None);
+                    },
+                    // write
+                    64  => {
+                        let fd = inst.state.unwrap().reg(Register::A0);
+                        let buf = inst.state.unwrap().reg(Register::A1);
+                        let len = inst.state.unwrap().reg(Register::A2);
+
+                        let file = self.get_fd(fd as usize);
+                        if let Some(file) = file {
+                            if file == &File::Stdout || file == &File::Stderr {
+                                let bytes =
+                                    self.mmu.read(VirtAddr(buf as usize),
+                                    len as usize).unwrap();
+                                print!("{}", core::str::from_utf8(bytes).unwrap());
+                            }
+                        } else {
+                            rt.val = !0;
+                            rt.reg = Register::A0;
+                        }
+                        rt.val = 0;
+                        rt.reg = Register::A0;
+                        return (Some(rt), None);
+                    },
+                    // close
+                    57  => {
+                        let fd = inst.state.unwrap().reg(Register::A0);
+                        let file = self.get_fd(fd as usize);
+                        if file.is_some() {
+                            //*file = None;
+                            rt.val = 0;
+                            rt.reg = Register::A0;
+                        } else {
+                            rt.val = !0;
+                            rt.reg = Register::A0;
+                        }
+                        return(Some(rt), None);
+                    },
+                    // exit
+                    93  => {
+                        rt.is_exit = true;
+                        return(Some(rt), None);
+                    }
+                    _  => {
+                        unimplemented!("unspecified syscall name {:?}", num);
+                    }
+                }
+
+            },
+            Opcode::LHU => {
+                let addr = inst.state.unwrap().reg(inst.rs1().unwrap())
+                    .wrapping_add(inst.imm().unwrap() as u32) as usize;
+                let mut tmp = [0u8; 2];
+                rt.val = u16::from_le_bytes(self.mmu
+                    .read_half(VirtAddr(addr))) as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::SRLI => {
+                let shamt = inst.imm().unwrap() & 0b111111;
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32) 
+                    >> shamt;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::SLL => {
+                let shamt = inst.state.unwrap()
+                    .reg(inst.rs2().unwrap()) as u32 & 0b111111;
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32) 
+                    << shamt;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::SLTIU => {
+                if (inst.rs1().unwrap() as u32) <
+                    (inst.imm().unwrap() as u32) {
+                        rt.val = 1;
+                    } else {
+                        rt.val = 0;
+                    }
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::ORI => {
+                rt.val = inst.state.unwrap().reg(inst.rs1().unwrap()) |
+                    inst.imm().unwrap() as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::BGE => {
+                let rs1 = inst.state.unwrap().reg(inst.rs1().unwrap());
+                let rs2 = inst.state.unwrap().reg(inst.rs2().unwrap());
+                if (rs1 as i32) >= (rs2 as i32){
+                    self.state.set(Register::Pc, (inst.pc)
+                        .wrapping_add(inst.imm().unwrap() as u32));
+                    self.pipe.decode.inst = None;
+                    self.pipe.fetch.inst = None;
+                } else {
+                    rt.val = 0;
+                    rt.reg = Register::Zero;
+                }
+                return (Some(rt), None);
+            },
+            Opcode::XOR => {
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32 ^
+                inst.state.unwrap().reg(inst.rs2().unwrap()) as u32);
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::XORI => {
+                rt.val = inst.state.unwrap().reg(inst.rs1().unwrap()) ^
+                    inst.imm().unwrap() as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::SLTU => {
+                if (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32) <
+                    (inst.state.unwrap().reg(inst.rs2().unwrap()) as u32) {
+                        rt.val = 1;
+                    } else {
+                        rt.val = 0;
+                    }
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::MUL => {
+                let val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as i64 *
+                inst.state.unwrap().reg(inst.rs2().unwrap()) as i64) as u64;
+                rt.reg = inst.rd().unwrap();
+                rt.val = ((val << 32) >> 32) as u32;
+                return (Some(rt), None);
+            },
+            Opcode::REMU => {
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32 %
+                inst.state.unwrap().reg(inst.rs2().unwrap()) as u32) as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::MULHU => {
+                let val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u64 *
+                inst.state.unwrap().reg(inst.rs2().unwrap()) as u64);
+                rt.val = (val >> 32) as u32;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::SRL => {
+                let shamt = inst.state.unwrap()
+                    .reg(inst.rs2().unwrap()) as u32 & 0b111111;
+                rt.val = (inst.state.unwrap().reg(inst.rs1().unwrap()) as u32) 
+                    >> shamt;
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::SLTI => {
+                if (inst.state.unwrap().reg(inst.rs1().unwrap()) as i32) <
+                    (inst.imm().unwrap() as i32) {
+                        rt.val = 1;
+                    } else {
+                        rt.val = 0;
+                    }
+                rt.reg = inst.rd().unwrap();
+                return (Some(rt), None);
+            },
+            Opcode::DIVU => {
+                // FIXME handle division by zero
+                let val1 = inst.state.unwrap().reg(inst.rs1().unwrap());
+                let val2 = inst.state.unwrap().reg(inst.rs2().unwrap());
+                //println!("rs1: {:?}, rs2: {:?}, val: {:?}, pc: {:x?}",
+                    //inst.state.unwrap().reg(inst.rs1().unwrap()),
+                    //inst.state.unwrap().reg(inst.rs2().unwrap()), val1 / val2,
+                    //inst.pc);
+                rt.val = val1 / val2;
+                rt.reg = inst.rd().unwrap();
+                //println!("{:x?}", inst.pc);
+                return (Some(rt), None);
+            },
             _             => {
                 println!("{:#}", self);
-                println!("{:x?}", inst);
                 unimplemented!("unimplemented Opcode {:?}", inst.opcode)
             }
         }

@@ -7,3 +7,6 @@ edition = "2021"
 
 [dependencies]
 elven_parse = { path = "./shared/elven_parse" }
+
+[profile.release]
+debug = true

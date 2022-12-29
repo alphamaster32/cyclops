@@ -121,6 +121,10 @@ impl Mmu {
         buf
     }
 
+    pub fn read(&self, addr: VirtAddr, size: usize) -> Result<&[u8], Error> {
+        Ok(&self.memory[addr.0..addr.0 + size])
+    }
+
     /// Allocate memory in mmu
     pub fn allocate(&mut self, size: usize) -> Option<VirtAddr> {
         // align to byte boundary
